@@ -5,7 +5,9 @@ import chainlit as cl
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-
+from src.rag_chat import (
+    answer_from_papers, rag_welcome_message, RAG_PROFILE, RESEARCH_PROFILE
+)
 from src.config import config
 from src.state import ResearchState
 from src.graph import create_research_graph
@@ -231,7 +233,19 @@ async def run_research_with_updates(topic: str, progress_display: EnhancedProgre
         return final_state
     finally:
         progress_callback.unregister(on_progress)
-
+@cl.set_chat_profiles
+async def chat_profiles():
+    return [
+        cl.ChatProfile(
+            name=RESEARCH_PROFILE,
+            markdown_description="Full multi-agent pipeline: plans, searches the web, evaluates sources, and writes a cited report.",
+            default=True,
+        ),
+        cl.ChatProfile(
+            name=RAG_PROFILE,
+            markdown_description="Fast Q&A over a curated local corpus of AI/ML arXiv papers. Answers only from retrieved excerpts.",
+        ),
+    ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CHAT HANDLERS
@@ -242,6 +256,9 @@ async def start():
     """Initialize with an engaging welcome experience."""
     
     # Store session state
+    if cl.user_session.get("chat_profile") == RAG_PROFILE:
+        await rag_welcome_message()
+        return
     cl.user_session.set("research_count", 0)
     
     # Create action buttons for quick start
@@ -733,7 +750,9 @@ async def main(message: cl.Message):
             content="Please provide a research topic."
         ).send()
         return
-    
+    if cl.user_session.get("chat_profile") == RAG_PROFILE:
+        await answer_from_papers(topic)
+        return
     # Check for special commands
     if topic.lower() in ["/history", "history", "show history"]:
         await on_show_history(cl.Action(name="show_history", payload={}))

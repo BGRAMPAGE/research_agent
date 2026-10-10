@@ -4,7 +4,7 @@ from typing import Annotated, List, Dict, Optional, Literal
 from pydantic import BaseModel, Field
 from langgraph.graph import MessagesState
 from langchain_core.messages import BaseMessage
-
+import operator
 
 class SearchQuery(BaseModel):
     """A search query with metadata."""
@@ -47,9 +47,9 @@ class ResearchState(BaseModel):
     plan: Optional[ResearchPlan] = Field(default=None, description="Research plan")
     
     # Search phase
-    search_results: List[SearchResult] = Field(
+    search_results: Annotated[List[SearchResult], operator.add] = Field(
         default_factory=list,
-        description="All search results collected"
+        description="All search results collected (accumulates across refinement passes)"
     )
     
     # Synthesis phase
@@ -79,9 +79,28 @@ class ResearchState(BaseModel):
     # Metadata
     iterations: int = Field(default=0, description="Number of iterations")
     
+    # After the existing "iterations" field, add:
+
+    research_gaps: List[str] = Field(
+        default_factory=list,
+        description="Gaps identified during synthesis that a follow-up search could fill"
+    )
+    synthesis_confidence: str = Field(
+        default="medium",
+        description="Synthesizer's confidence in coverage: 'high', 'medium', or 'low'"
+    )
+    refinement_count: int = Field(
+        default=0,
+        description="Number of times the plan has been refined based on gaps (capped in graph.py)"
+    )
+    
     # Quality and metrics
     quality_score: Optional[Dict] = Field(default=None, description="Report quality metrics")
-    credibility_scores: List[Dict] = Field(default_factory=list, description="Source credibility scores")
+    
+    credibility_scores: Annotated[List[Dict], operator.add] = Field(
+        default_factory=list,
+        description="Source credibility scores (accumulates across refinement passes, same order as search_results)"
+    )
     
     # LLM tracking
     llm_calls: int = Field(default=0, description="Total number of LLM API calls")

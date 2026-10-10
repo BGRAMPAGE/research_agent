@@ -75,6 +75,11 @@ class ResearchConfig(BaseModel):
         description="Maximum number of search queries to generate"
     )
     
+    max_refinement_loops: int = Field(
+        default=int(os.getenv("MAX_REFINEMENT_LOOPS", "1")),
+        description="Maximum number of adaptive plan-refinement loops after synthesis (0 disables the feature)"
+    )
+    
     max_search_results_per_query: int = Field(
         default=int(os.getenv("MAX_SEARCH_RESULTS_PER_QUERY", "3")),
         description="Maximum results to fetch per search query"
@@ -118,6 +123,19 @@ class ResearchConfig(BaseModel):
         default=os.getenv("LANGCHAIN_PROJECT", "self_learning_agent"),
         description="LangSmith project name"
     )
+    
+    # RAG Configuration
+    rag_enabled: bool = Field(
+        default=os.getenv("RAG_ENABLED", "true").lower() == "true",
+        description="Whether the local paper-corpus RAG tool/page is active"
+    )
+    rag_db_host: str = Field(default=os.getenv("RAG_DB_HOST", "localhost"))
+    rag_db_port: int = Field(default=int(os.getenv("RAG_DB_PORT", "5433")))
+    rag_db_name: str = Field(default=os.getenv("RAG_DB_NAME", "next_embed_model"))
+    rag_db_user: str = Field(default=os.getenv("RAG_DB_USER", "research_user"))
+    rag_db_password: str = Field(default=os.getenv("RAG_DB_PASSWORD", ""))
+    rag_embedding_model: str = Field(default=os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3"))
+    rag_top_k: int = Field(default=int(os.getenv("RAG_TOP_K", "5")))
     
     def validate_config(self) -> bool:
         """Validate that required configuration is present."""

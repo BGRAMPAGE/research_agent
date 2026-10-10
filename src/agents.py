@@ -24,12 +24,14 @@ from src.llm_tracker import estimate_tokens
 from src.exceptions import PlanningError, SearchError, SynthesisError, ReportGenerationError
 from src.prompts import (
     PLANNER_SYSTEM_PROMPT, PLANNER_USER_TEMPLATE,
+    PLANNER_REFINE_SYSTEM_PROMPT, PLANNER_REFINE_USER_TEMPLATE,
     SEARCHER_SYSTEM_PROMPT, SEARCHER_USER_TEMPLATE,
     SYNTHESIZER_SYSTEM_PROMPT, SYNTHESIZER_USER_TEMPLATE,
     WRITER_SYSTEM_PROMPT, WRITER_USER_TEMPLATE
 )
 from src.callbacks import (
     emit_planning_start, emit_planning_complete,
+    emit_refinement_start, emit_refinement_complete,
     emit_search_start, emit_search_results, 
     emit_extraction_start, emit_extraction_complete,
     emit_synthesis_start, emit_synthesis_progress, emit_synthesis_complete,
@@ -199,6 +201,143 @@ class ResearchPlanner:
         return {
             "error": "Planning failed: Maximum retries exceeded",
             "iterations": state.iterations + 1
+        }
+    
+    async def refine_plan(self, state: ResearchState) -> Dict[str, Any]:
+        """Generate targeted follow-up search queries based on synthesis gaps.
+
+        This is a SECOND pass, only meaningful when the synthesizer reported
+        non-empty research_gaps. It replaces state.plan.search_queries with a
+        small, focused set of new queries aimed only at those gaps — it does
+        NOT redo the original plan or objectives.
+
+        On any failure, this degrades gracefully to "reporting" rather than
+        raising an error, so a refinement failure never kills a research run
+        that already has usable findings.
+        """
+        if not state.research_gaps:
+            logger.info("No research gaps to refine; skipping plan refinement")
+            return {"current_stage": "reporting"}
+
+        if not state.plan:
+            logger.warning("No existing plan to refine against; skipping")
+            return {"current_stage": "reporting"}
+
+        logger.info(f"Refining plan to address {len(state.research_gaps)} gap(s)")
+        await emit_refinement_start(len(state.research_gaps))
+
+        max_followup_queries = 2
+
+                # NOTE: unlike the planner's main plan() method, we do NOT pre-format
+        # PLANNER_REFINE_SYSTEM_PROMPT with Python's .format() here, because it
+        # contains a literal JSON worked example ({{ }}-escaped). Pre-formatting
+        # would collapse those to single braces and ChatPromptTemplate would then
+        # try to re-parse them as its own template variables, crashing. Instead
+        # we pass the raw template through and let ChatPromptTemplate do the
+        # substitution once, at invoke time — same as PLANNER_USER_TEMPLATE.
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", PLANNER_REFINE_SYSTEM_PROMPT),
+            ("human", PLANNER_REFINE_USER_TEMPLATE)
+        ])
+
+        gaps_text = "\n".join(f"- {g}" for g in state.research_gaps)
+        findings_text = "\n".join(f"- {f}" for f in state.key_findings[:10])
+
+        for attempt in range(self.max_retries):
+            try:
+                start_time = time.time()
+                chain = prompt | self.llm | JsonOutputParser()
+
+                input_text = f"{state.research_topic} {gaps_text} {findings_text}"
+                input_tokens = estimate_tokens(input_text)
+
+                result = await chain.ainvoke({
+                    "topic": state.research_topic,
+                    "gaps": gaps_text,
+                    "existing_findings": findings_text,
+                    "max_followup_queries": max_followup_queries
+                })
+
+                duration = time.time() - start_time
+                output_tokens = estimate_tokens(str(result))
+
+                follow_up = result.get("follow_up_queries", []) if isinstance(result, dict) else []
+
+                if not follow_up:
+                    logger.info("Refinement produced no follow-up queries; proceeding to report")
+                    return {
+                        "current_stage": "reporting",
+                        "refinement_count": state.refinement_count + 1,
+                        "llm_calls": state.llm_calls + 1,
+                        "total_input_tokens": state.total_input_tokens + input_tokens,
+                        "total_output_tokens": state.total_output_tokens + output_tokens,
+                    }
+
+                new_queries = [
+                    SearchQuery(
+                        query=q["query"],
+                        purpose=q.get("purpose", "Fill identified research gap")
+                    )
+                    for q in follow_up[:max_followup_queries]
+                    if q.get("query")
+                ]
+
+                if not new_queries:
+                    return {
+                        "current_stage": "reporting",
+                        "refinement_count": state.refinement_count + 1,
+                    }
+
+                # Replace search_queries with ONLY the new follow-up queries.
+                # NOTE: the search node currently overwrites state.search_results
+                # entirely on each run. Step 3 (graph.py) must change that so a
+                # second search pass MERGES with existing results instead of
+                # replacing them — otherwise this refinement would lose the
+                # original findings' source data.
+                refined_plan = state.plan.model_copy(update={"search_queries": new_queries})
+
+                call_detail = {
+                    'agent': 'ResearchPlanner',
+                    'operation': 'refine_plan',
+                    'model': config.model_name,
+                    'input_tokens': input_tokens,
+                    'output_tokens': output_tokens,
+                    'duration': round(duration, 2),
+                    'attempt': attempt + 1
+                }
+
+                logger.info(f"Generated {len(new_queries)} follow-up queries")
+                await emit_refinement_complete(len(new_queries))
+
+                return {
+                    "plan": refined_plan,
+                    "current_stage": "searching",
+                    "refinement_count": state.refinement_count + 1,
+                    "research_gaps": [],  # clear so the same gaps can't trigger another loop
+                    "iterations": state.iterations + 1,
+                    "llm_calls": state.llm_calls + 1,
+                    "total_input_tokens": state.total_input_tokens + input_tokens,
+                    "total_output_tokens": state.total_output_tokens + output_tokens,
+                    "llm_call_details": state.llm_call_details + [call_detail]
+                }
+
+            except Exception as e:
+                logger.warning(f"Plan refinement attempt {attempt + 1} failed: {str(e)}")
+                if attempt == self.max_retries - 1:
+                    logger.warning(
+                        "Refinement failed after all retries; proceeding to report "
+                        "with existing findings rather than failing the run"
+                    )
+                    return {
+                        "current_stage": "reporting",
+                        "refinement_count": state.refinement_count + 1,
+                    }
+                else:
+                    await asyncio.sleep(2 ** attempt)
+
+        return {
+            "current_stage": "reporting",
+            "refinement_count": state.refinement_count + 1,
         }
 
 
@@ -376,7 +515,7 @@ class ResearchSearcher:
                                     title=item.get('title', ''),
                                     url=item.get('url', ''),
                                     snippet=item.get('snippet', ''),
-                                    content=None
+                                    content=item.get('content')
                                 ))
                 except Exception as e:
                     logger.warning(f"Error parsing tool result: {e}")
@@ -410,7 +549,8 @@ class ResearchSynthesizer:
     async def synthesize(self, state: ResearchState) -> Dict[str, Any]:
         """Autonomously synthesize key findings using tools and reasoning.
         
-        Returns dict with key findings that LangGraph will merge into state.
+        Returns dict with key findings, research gaps, and confidence that
+        LangGraph will merge into state.
         """
         logger.info(f"Synthesizing findings from {len(state.search_results)} results")
         
@@ -470,14 +610,22 @@ class ResearchSynthesizer:
                     'attempt': attempt + 1
                 }
                 
-                key_findings = self._extract_findings(output_text, state.search_results)
+                synthesis_output = self._extract_synthesis_output(output_text, state.search_results)
+                key_findings = synthesis_output["findings"]
+                gaps = synthesis_output["gaps"]
+                confidence = synthesis_output["confidence"]
                 
-                logger.info(f"Extracted {len(key_findings)} key findings")
+                logger.info(
+                    f"Extracted {len(key_findings)} key findings, "
+                    f"{len(gaps)} gaps, confidence={confidence}"
+                )
                 
                 await emit_synthesis_complete(len(key_findings))
                 
                 return {
                     "key_findings": key_findings,
+                    "research_gaps": gaps,
+                    "synthesis_confidence": confidence,
                     "current_stage": "reporting",
                     "iterations": state.iterations + 1,
                     "llm_calls": state.llm_calls + 1,
@@ -521,39 +669,63 @@ class ResearchSynthesizer:
             for i, (r, cred) in enumerate(zip(results, credibility_scores))
         ])
     
-    def _extract_findings(self, output_text: str, search_results: list) -> List[str]:
-        """Extract key findings from synthesis output."""
-        json_match = re.search(r'\[(.*?)\]', output_text, re.DOTALL)
-        
-        key_findings = []
-        if json_match:
+    def _extract_synthesis_output(self, output_text: str, search_results: list) -> Dict[str, Any]:
+        """Parse the synthesizer's structured output: findings, gaps, confidence.
+
+        Tries the new object format first: {"findings": [...], "gaps": [...], "confidence": "..."}.
+        Falls back to the old bare-array format, then line-based extraction, then a
+        basic snippet-based fallback — so smaller/local models that don't follow the
+        object format exactly still degrade gracefully instead of breaking the pipeline.
+        """
+        findings: List[str] = []
+        gaps: List[str] = []
+        confidence = "medium"
+
+        # 1. New object format
+        obj_match = re.search(r'\{.*\}', output_text, re.DOTALL)
+        if obj_match:
             try:
-                findings = json.loads(json_match.group(0))
-                if isinstance(findings, list):
-                    key_findings = [str(f) for f in findings]
-                else:
-                    key_findings = [str(findings)]
+                parsed = json.loads(obj_match.group(0))
+                if isinstance(parsed, dict) and "findings" in parsed:
+                    findings = [str(f) for f in parsed.get("findings", [])]
+                    gaps = [str(g) for g in parsed.get("gaps", [])]
+                    confidence = str(parsed.get("confidence", "medium")).lower()
+                    if confidence not in ("high", "medium", "low"):
+                        confidence = "medium"
             except json.JSONDecodeError:
                 pass
-        
-        if not key_findings:
+
+        # 2. Old bare-array format (backward compatibility)
+        if not findings:
+            arr_match = re.search(r'\[(.*?)\]', output_text, re.DOTALL)
+            if arr_match:
+                try:
+                    parsed = json.loads(arr_match.group(0))
+                    if isinstance(parsed, list):
+                        findings = [str(f) for f in parsed]
+                except json.JSONDecodeError:
+                    pass
+
+        # 3. Line-based extraction fallback
+        if not findings:
             lines = output_text.split('\n')
             for line in lines:
                 line = line.strip().lstrip('-').lstrip('*').lstrip('>').strip()
                 line = re.sub(r'^\d+\.\s*', '', line)
                 if len(line) > 30 and not line.startswith('[') and not line.startswith(']'):
-                    key_findings.append(line)
-            key_findings = key_findings[:15]
-        
-        if not key_findings and search_results:
+                    findings.append(line)
+            findings = findings[:15]
+
+        # 4. Last resort: basic findings from raw snippets
+        if not findings and search_results:
             logger.warning("Agent produced no findings, creating basic ones from results")
-            key_findings = [
+            findings = [
                 f"{r.title}: {r.snippet[:100]}..."
                 for r in search_results[:10]
                 if r.snippet
             ]
-        
-        return key_findings
+
+        return {"findings": findings, "gaps": gaps, "confidence": confidence}
 
 
 # =============================================================================

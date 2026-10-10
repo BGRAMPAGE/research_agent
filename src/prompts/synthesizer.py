@@ -59,18 +59,29 @@ Before finalizing, verify:
 
 ## Output Format
 
-Return findings as a JSON array of strings. Each finding should:
-- Be a complete, standalone insight
-- Include source references where applicable
-- Be specific enough to be useful (avoid generic statements)
-- Focus on facts over opinions (unless opinion is from recognized experts)
+Return a single JSON OBJECT (not a bare array) with three keys:
 
-Example format:
-[
-    "Finding 1: [Specific fact or insight] - supported by sources [1], [3]",
-    "Finding 2: [Technical detail with specifics] - per official documentation [2]",
-    "Finding 3: [Trend or development] - noted across multiple industry sources [4], [5], [6]"
-]
+{
+    "findings": [
+        "Finding 1: [Specific fact] - supported by sources [1], [3]",
+        "Finding 2: [Technical detail] - per official documentation [2]"
+    ],
+    "gaps": [
+        "The sources do not clarify [specific missing aspect]",
+        "No source addresses [specific sub-question implied by the objectives]"
+    ],
+    "confidence": "high"
+}
+
+- "findings": 10-15 items, same rules as before (specific, attributed, no hallucination).
+- "gaps": 0-5 items. Only include a REAL, SPECIFIC gap a targeted follow-up search could fill —
+  not a vague "more research needed." If there are no real gaps, return an empty list.
+- "confidence": "high" if objectives are well covered by HIGH-credibility sources,
+  "medium" if partially covered or reliant on MEDIUM sources, "low" if objectives are
+  largely unaddressed or sources are mostly LOW credibility.
+
+Your ENTIRE response must be that one JSON object. Do not add commentary before or after it,
+and do not wrap it in a bare array — "findings", "gaps", and "confidence" must all be present.
 
 ## Anti-Hallucination Rules
 DO NOT invent statistics, dates, or specifics not in sources
@@ -101,21 +112,30 @@ Analyze the search results below and extract the most important, accurate, and w
 2. **Cross-Reference**: Note which findings are supported by multiple sources
 3. **Resolve Conflicts**: When sources disagree, trust higher-credibility sources
 4. **Maintain Specificity**: Include specific details, numbers, and technical information
-5. **Note Limitations**: Flag areas where information is sparse or contradictory
+5. **Note Limitations**: Flag areas where information is sparse or contradictory, and record them in "gaps"
 
 ### Output Requirements:
-Return a JSON array of 10-15 key findings. Each finding should:
+Return a single JSON OBJECT with exactly three keys: "findings", "gaps", "confidence".
+Do NOT return a bare array — the object wrapper is required.
+
+Each finding must:
 - Be a complete, specific statement (not vague generalizations)
 - Reference source numbers when citing facts: "...according to [1]" or "...per [3], [5]"
 - Focus on facts that directly address the research topic
 - Prioritize findings from HIGH-credibility sources
 
 Example format:
-[
-    "The technology uses [specific mechanism] to achieve [specific outcome], enabling [specific capability] [1]",
-    "According to official documentation [2], the key components include: [list specific items]",
-    "Industry adoption has grown to [specific metric], with major deployments at [specific examples] [3], [5]",
-    "Experts note challenges including [specific challenge 1] and [specific challenge 2] [4]"
-]
+{{
+    "findings": [
+        "The technology uses [specific mechanism] to achieve [specific outcome], enabling [specific capability] [1]",
+        "According to official documentation [2], the key components include: [list specific items]",
+        "Industry adoption has grown to [specific metric], with major deployments at [specific examples] [3], [5]",
+        "Experts note challenges including [specific challenge 1] and [specific challenge 2] [4]"
+    ],
+    "gaps": [
+        "No source specifies [specific missing detail implied by the objectives]"
+    ],
+    "confidence": "medium"
+}}
 
-Analyze the sources now and extract your findings:"""
+Analyze the sources now and return your findings, gaps, and confidence as one JSON object:"""

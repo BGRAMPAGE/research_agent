@@ -61,6 +61,110 @@ def create_sqlite_checkpointer():
 # Graph Construction
 # =============================================================================
 
+# def create_research_graph(checkpointer=None):
+#     """Create the research workflow graph with enhanced routing and error handling.
+    
+#     Args:
+#         checkpointer: Optional checkpointer (MemorySaver or SqliteSaver) for persistence
+        
+#     Returns:
+#         Compiled LangGraph workflow
+#     """
+    
+#     planner = ResearchPlanner()
+#     searcher = ResearchSearcher()
+#     synthesizer = ResearchSynthesizer()
+#     writer = ReportWriter(citation_style=config.citation_style)
+    
+#     workflow = StateGraph(ResearchState)
+    
+#     workflow.add_node("plan", planner.plan)
+#     workflow.add_node("search", searcher.search)
+#     workflow.add_node("synthesize", synthesizer.synthesize)
+#     workflow.add_node("write_report", writer.write_report)
+    
+#     workflow.add_edge(START, "plan")
+    
+#     def should_continue_after_plan(state: ResearchState) -> str:
+#         """Validate planning output and route appropriately."""
+#         if state.error:
+#             logger.error(f"Planning failed: {state.error}")
+#             return END
+        
+#         if not state.plan or not state.plan.search_queries:
+#             logger.error("No search queries generated in plan")
+#             return END
+            
+#         logger.info(f"Plan validated: {len(state.plan.search_queries)} queries")
+#         return "search"
+    
+#     def should_continue_after_search(state: ResearchState) -> str:
+#         """Validate search results and route appropriately."""
+#         if state.error:
+#             logger.error(f"Search failed: {state.error}")
+#             return END
+        
+#         if not state.search_results:
+#             logger.warning("No search results found")
+#             return END
+        
+#         if len(state.search_results) < 2:
+#             logger.warning(f"Insufficient search results: {len(state.search_results)}")
+#             return END
+            
+#         logger.info(f"Search validated: {len(state.search_results)} results")
+#         return "synthesize"
+    
+#     def should_continue_after_synthesize(state: ResearchState) -> str:
+#         """Validate synthesis output and route appropriately."""
+#         if state.error:
+#             logger.error(f"Synthesis failed: {state.error}")
+#             return END
+        
+#         if not state.key_findings:
+#             logger.warning("No key findings extracted")
+#             return END
+        
+#         logger.info(f"Synthesis validated: {len(state.key_findings)} findings")
+#         return "write_report"
+    
+#     def should_continue_after_report(state: ResearchState) -> str:
+#         """Validate final report and complete workflow."""
+#         if state.error:
+#             logger.error(f"Report generation failed: {state.error}")
+#         elif not state.final_report:
+#             logger.error("No report generated")
+#         else:
+#             logger.info("Report generation complete")
+            
+#         return END
+    
+#     workflow.add_conditional_edges(
+#         "plan",
+#         should_continue_after_plan,
+#         {"search": "search", END: END}
+#     )
+    
+#     workflow.add_conditional_edges(
+#         "search",
+#         should_continue_after_search,
+#         {"synthesize": "synthesize", END: END}
+#     )
+    
+#     workflow.add_conditional_edges(
+#         "synthesize",
+#         should_continue_after_synthesize,
+#         {"write_report": "write_report", END: END}
+#     )
+    
+#     workflow.add_conditional_edges(
+#         "write_report",
+#         should_continue_after_report,
+#         {END: END}
+#     )
+    
+#     return workflow.compile(checkpointer=checkpointer)
+
 def create_research_graph(checkpointer=None):
     """Create the research workflow graph with enhanced routing and error handling.
     
@@ -81,6 +185,7 @@ def create_research_graph(checkpointer=None):
     workflow.add_node("plan", planner.plan)
     workflow.add_node("search", searcher.search)
     workflow.add_node("synthesize", synthesizer.synthesize)
+    workflow.add_node("refine_plan", planner.refine_plan)
     workflow.add_node("write_report", writer.write_report)
     
     workflow.add_edge(START, "plan")
@@ -116,7 +221,14 @@ def create_research_graph(checkpointer=None):
         return "synthesize"
     
     def should_continue_after_synthesize(state: ResearchState) -> str:
-        """Validate synthesis output and route appropriately."""
+        """Validate synthesis output and decide: refine the plan, or write the report.
+        
+        Refinement triggers when the synthesizer identified real gaps AND we haven't
+        already hit the refinement loop cap. Confidence is NOT a gate here — a synthesis
+        can be highly confident about what it found while still having specific,
+        worth-filling gaps in what it didn't find (these are independent signals).
+        Confidence is logged for visibility but no longer blocks refinement.
+        """
         if state.error:
             logger.error(f"Synthesis failed: {state.error}")
             return END
@@ -124,8 +236,35 @@ def create_research_graph(checkpointer=None):
         if not state.key_findings:
             logger.warning("No key findings extracted")
             return END
-        
+            
         logger.info(f"Synthesis validated: {len(state.key_findings)} findings")
+        
+        if state.research_gaps and state.refinement_count < config.max_refinement_loops:
+            logger.info(
+                f"Routing to plan refinement: {len(state.research_gaps)} gap(s), "
+                f"confidence={state.synthesis_confidence} (informational only), "
+                f"refinement_count={state.refinement_count}/{config.max_refinement_loops}"
+            )
+            return "refine_plan"
+        
+        return "write_report"
+    
+    def should_continue_after_refine(state: ResearchState) -> str:
+        """Route after plan refinement: back to search for a follow-up pass,
+        or straight to writing if refinement decided there was nothing worth searching
+        (or failed gracefully)."""
+        if state.error:
+            logger.warning(f"Plan refinement had an error, writing report with existing findings: {state.error}")
+            return "write_report"
+        
+        if state.current_stage == "searching" and state.plan and state.plan.search_queries:
+            logger.info(
+                f"Refinement produced {len(state.plan.search_queries)} follow-up "
+                f"quer{'y' if len(state.plan.search_queries) == 1 else 'ies'}; re-searching"
+            )
+            return "search"
+        
+        logger.info("Refinement produced no follow-up queries; proceeding to write_report")
         return "write_report"
     
     def should_continue_after_report(state: ResearchState) -> str:
@@ -154,7 +293,13 @@ def create_research_graph(checkpointer=None):
     workflow.add_conditional_edges(
         "synthesize",
         should_continue_after_synthesize,
-        {"write_report": "write_report", END: END}
+        {"refine_plan": "refine_plan", "write_report": "write_report", END: END}
+    )
+    
+    workflow.add_conditional_edges(
+        "refine_plan",
+        should_continue_after_refine,
+        {"search": "search", "write_report": "write_report"}
     )
     
     workflow.add_conditional_edges(

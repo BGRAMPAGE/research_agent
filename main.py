@@ -33,9 +33,11 @@ async def main():
         print("=" * 50)
         topic = input("\nEnter your research topic: ").strip()
     
+    
     if not topic:
         logger.error("No research topic provided")
         sys.exit(1)
+        
     
     print(f"\n[INFO] Starting deep research on: {topic}\n")
     print("This may take several minutes. Please wait...\n")

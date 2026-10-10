@@ -1,5 +1,6 @@
 """LLM-invokable tools for research agents."""
-
+import asyncio
+from src.utils.paper_db import get_paper_retriever, format_authors
 from typing import List, Optional, Dict
 from langchain_core.tools import tool
 import logging
@@ -35,6 +36,72 @@ _search_impl = WebSearchImpl(
 )
 _extractor_impl = ContentExtractorImpl(timeout=10)
 _citation_formatter = CitationFormatter()
+
+@tool
+async def search_paper_database(query: str, top_k: int = 5) -> List[dict]:
+    """Search a curated local database of ~423 AI/ML/NLP arXiv papers (chunked and
+    embedded) for highly relevant, pre-vetted technical content.
+
+    This is a LOCAL, curated corpus — not the open web. It's fast, has no rate limits,
+    and every source is a real, citable arXiv paper. Prefer this tool FIRST for
+    foundational or well-established ML/AI/NLP concepts and techniques (e.g. BERT,
+    attention, RLHF, chain-of-thought, RAG, PPO) before falling back to web_search or
+    arxiv_search for more recent, obscure, or non-ML topics this corpus won't cover.
+
+    ## When to Use
+    - Core ML/NLP/LLM concepts, architectures, and training techniques
+    - Questions about specific well-known papers (by name or topic)
+    - When you want faithful excerpts from the original paper text, not a summary
+
+    ## When NOT to Use
+    - Topics outside AI/ML/NLP
+    - Very recent developments not in this ~423-paper snapshot
+    - Company/product/business questions
+
+    Args:
+        query: A natural-language question or topic, e.g. "how does PPO work".
+        top_k: Number of chunks to retrieve (default 5).
+
+    Returns:
+        List of dicts with keys: query, title, url, snippet, content — "content" is
+        pre-populated with the full paper chunk text (no extraction round-trip needed).
+    """
+    retriever = get_paper_retriever()
+    if retriever is None:
+        logger.warning("Paper database unavailable (disabled or unreachable); skipping")
+        return []
+
+        MAX_CHUNKS_PER_PAPER = 2
+
+    try:
+        # Over-fetch, then cap chunks per paper so one paper can't fill every slot
+        raw = await asyncio.to_thread(retriever.search, query, top_k * 3)
+
+        picked, per_paper = [], {}
+        for r in raw:
+            if per_paper.get(r["paper_id"], 0) >= MAX_CHUNKS_PER_PAPER:
+                continue
+            per_paper[r["paper_id"]] = per_paper.get(r["paper_id"], 0) + 1
+            picked.append(r)
+            if len(picked) >= top_k:
+                break
+
+        # NOTE: the chunk text goes in "snippet" on purpose. The synthesizer
+        # truncates "content" to 300 chars but includes "snippet" in full.
+        return [
+            {
+                "query": query,
+                "title": r["title"],
+                "url": r.get("source_url") or f"local-corpus://paper/{r['paper_id']}",
+                "snippet": f"({format_authors(r['authors'])}) {r['content'][:900].strip()}",
+            }
+            for r in picked
+        ]
+    except Exception as e:
+        logger.error(f"Paper database search tool error: {str(e)}")
+        return []
+
+
 
 
 @tool
@@ -595,9 +662,9 @@ def validate_section_quality(section_text: str, min_words: int = 150) -> Dict[st
 
 # Tool lists for different agents
 research_search_tools = [
-    web_search,
-    extract_webpage_content
+    web_search, search_paper_database, extract_webpage_content
 ]
+# ... and the same addition in all_research_tools
 
 synthesis_tools = [
     extract_insights_from_text

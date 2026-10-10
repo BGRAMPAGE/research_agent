@@ -153,6 +153,24 @@ async def emit_planning_complete(num_queries: int, num_sections: int):
         progress_pct=15
     )
 
+async def emit_refinement_start(num_gaps: int):
+    """Emit plan refinement stage start."""
+    await emit_progress(
+        ResearchStage.PLANNING,
+        "Refining research plan",
+        f"Designing follow-up queries for {num_gaps} identified gap(s)",
+        progress_pct=52
+    )
+
+
+async def emit_refinement_complete(num_queries: int):
+    """Emit plan refinement stage completion."""
+    await emit_progress(
+        ResearchStage.PLANNING,
+        "Follow-up plan ready",
+        f"{num_queries} targeted follow-up quer{'y' if num_queries == 1 else 'ies'} generated",
+        progress_pct=55
+    )
 
 async def emit_search_start(query: str, query_num: int, total_queries: int):
     """Emit search start."""
