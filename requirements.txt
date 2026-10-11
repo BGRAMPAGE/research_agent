@@ -165,7 +165,6 @@ rpds-py==2026.6.3
 safetensors==0.8.0
 scikit-learn==1.9.1
 scipy==1.18.1
-sentence-transformers==6.1.0
 setuptools==84.0.0
 shellingham==1.5.4
 simple-websocket==1.1.0
@@ -184,10 +183,8 @@ threadpoolctl==3.7.0
 tiktoken==0.14.0
 tokenizers==0.23.2
 tomli==2.4.1
-torch==2.14.0
 tqdm==4.70.1
 traceloop-sdk==0.62.3
-transformers==5.17.0
 truststore==0.10.4
 typer==0.27.2
 typing-inspect==0.9.0
