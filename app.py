@@ -1150,6 +1150,7 @@ async def main(message: cl.Message):
         return
 
     if cl.user_session.get("chat_profile") == RAG_PROFILE:
+        from src.rag_chat import answer_from_papers
 
         await answer_from_papers(topic)
 
