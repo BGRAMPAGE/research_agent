@@ -392,7 +392,7 @@ async def start():
 
     # Store session state
     if cl.user_session.get("chat_profile") == RAG_PROFILE:
-
+        from src.rag_chat import rag_welcome_message
         await rag_welcome_message()
 
         return
